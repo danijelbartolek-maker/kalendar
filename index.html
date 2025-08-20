@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="hr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Kalendar rezervacija</title>
+    <meta name="theme-color" content="#10b981"/>
+    <link rel="manifest" href="./manifest.webmanifest">
+    <link rel="apple-touch-icon" href="./icons/icon-192.png">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  </head>
+  <body class="bg-slate-50">
+    <div id="root"></div>
+    <script type="text/babel">
+      const { useEffect, useMemo, useState } = React;
+
+      // ---------- Helpers ----------
+      const fmtDate = (d) => new Date(d).toISOString().slice(0, 10);
+      const toDate = (s) => new Date(s + "T00:00:00");
+      const nightsBetween = (start, end) => {
+        const ms = toDate(end) - toDate(start);
+        return Math.max(0, Math.round(ms / (1000 * 60 * 60 * 24)));
+      };
+      const eur = (n) => new Intl.NumberFormat("hr-HR", { style: "currency", currency: "EUR" }).format(n ?? 0);
+      const id = () => Math.random().toString(36).slice(2, 9);
+
+      const overlaps = (a, b) => {
+        const aStart = toDate(a.start);
+        const aEnd = toDate(a.end);
+        const bStart = toDate(b.start);
+        const bEnd = toDate(b.end);
+        return aStart < bEnd && bStart < aEnd;
+      };
+
+      const load = () => {
+        try { return JSON.parse(localStorage.getItem("reservations_v1") || "[]"); } catch { return []; }
+      };
+      const save = (items) => localStorage.setItem("reservations_v1", JSON.stringify(items));
+
+      // ---------- Timeline ----------
+      function MonthTimeline({ month, reservations, onEdit }) {
+        if (!month) return null;
+        const [y, m] = month.split("-").map(Number);
+        const start = new Date(y, m - 1, 1);
+        const end = new Date(y, m, 1);
+        const days = Math.round((end - start) / (1000*60*60*24));
+        const columns = Array.from({ length: days }, (_, i) => fmtDate(new Date(y, m - 1, 1 + i)));
+
+        const rows = React.useMemo(() => {
+          const monthRange = { start: fmtDate(start), end: fmtDate(end) };
+          const visible = reservations.filter((r) => overlaps(monthRange, r));
+          const lanes = [];
+          const placeInLane = (r) => {
+            for (const lane of lanes) {
+              if (!lane.some((x) => overlaps(x, r))) { lane.push(r); return; }
+            }
+            lanes.push([r]);
+          };
+          visible.forEach(placeInLane);
+          return lanes;
+        }, [month, reservations]);
+
+        return (
+          <div className="w-full overflow-auto">
+            <div className="min-w-[720px]">
+              <div className="grid" style={{ gridTemplateColumns: `160px repeat(${days}, minmax(24px, 1fr))` }}>
+                <div className="sticky left-0 bg-white z-10 font-semibold px-2 py-1 border-b">Rezervacije</div>
+                {columns.map((d) => (
+                  <div key={d} className="text-xs text-center px-1 py-1 border-b">{new Date(d).getDate()}</div>
+                ))}
+                {rows.length === 0 && (
+                  <div className="col-span-full text-center text-slate-500 py-6">Nema rezervacija za odabrani mjesec.</div>
+                )}
+                {rows.map((lane, i) => (
+                  <React.Fragment key={i}>
+                    <div className="sticky left-0 bg-white z-10 px-2 py-2 border-b">Lana {i + 1}</div>
+                    {columns.map((d) => (
+                      <div key={d+"-cell-"+i} className="border-b border-r h-8 relative"></div>
+                    ))}
+                    {lane.map((r) => {
+                      const s = toDate(r.start) < start ? start : toDate(r.start);
+                      const e = toDate(r.end) > end ? end : toDate(r.end);
+                      const startIdx = Math.max(0, Math.round((s - start)/(1000*60*60*24)));
+                      const span = Math.max(1, Math.round((e - s)/(1000*60*60*24)));
+                      return (
+                        <div key={r.id} className="contents">
+                          <div className="col-start-[2]" />
+                          <div
+                            className="h-6 rounded-xl bg-emerald-500/80 text-white text-xs flex items-center px-2 shadow cursor-pointer"
+                            style={{ gridColumn: `${startIdx + 2} / span ${span}`, alignSelf: "center" }}
+                            title={`${r.start} → ${r.end} • ${r.guests} gostiju • ${r.unit==='per_night'? eur(r.price)+"/noć" : eur(r.price)}\n${r.note || ""}`}
+                            onClick={() => onEdit?.(r)}
+                          >
+                            {fmtDate(r.start).slice(5)} → {fmtDate(r.end).slice(5)} · {r.guests} os.
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </React.Fragment>
+                ))}
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      // ---------- Main App ----------
+      function App() {
+        const today = fmtDate(new Date());
+        const [items, setItems] = useState(load());
+        const [editingId, setEditingId] = useState(null);
+        const [form, setForm] = useState({ start: today, end: today, guests: 2, price: "", note: "", unit: "total" });
+        useEffect(() => { save(items); }, [items]);
+
+        const addOrUpdate = () => {
+          if (!form.start || !form.end) return alert("Unesite datume dolaska i odlaska.");
+          if (toDate(form.end) <= toDate(form.start)) return alert("Datum odlaska mora biti poslije datuma dolaska.");
+          const payload = {
+            id: editingId || id(),
+            start: form.start, end: form.end,
+            guests: Number(form.guests) || 0,
+            price: Number(form.price) || 0,
+            unit: form.unit,
+            note: form.note?.trim() || "",
+            createdAt: new Date().toISOString(),
+          };
+          const other = items.filter((x) => x.id !== payload.id);
+          const willOverlap = other.some((x) => overlaps(x, payload));
+          if (willOverlap && !confirm("Ovaj termin se preklapa s postojećom rezervacijom. Želite li ga svejedno spremiti?")) return;
+          const next = editingId ? items.map((x) => (x.id === payload.id ? payload : x)) : [...items, payload];
+          setItems(next.sort((a, b) => toDate(a.start) - toDate(b.start)));
+          resetForm();
+        };
+
+        const resetForm = () => {
+          setEditingId(null);
+          setForm({ start: today, end: today, guests: 2, price: "", note: "", unit: "total" });
+        };
+
+        const onEdit = (row) => {
+          setEditingId(row.id);
+          setForm({ start: row.start, end: row.end, guests: row.guests, price: String(row.price), note: row.note, unit: row.unit || "total" });
+        };
+
+        const onDelete = (row) => {
+          if (confirm("Sigurno želite obrisati rezervaciju?")) {
+            setItems(items.filter((x) => x.id !== row.id));
+            if (editingId === row.id) resetForm();
+          }
+        };
+
+        const [filterMonth, setFilterMonth] = useState(fmtDate(new Date()).slice(0, 7));
+        const filtered = useMemo(() => {
+          if (!filterMonth) return items;
+          const [y, m] = filterMonth.split("-").map(Number);
+          const monthStart = new Date(y, m - 1, 1);
+          const monthEnd = new Date(y, m, 1);
+          return items.filter((r) => overlaps({ start: fmtDate(monthStart), end: fmtDate(monthEnd) }, r));
+        }, [items, filterMonth]);
+
+        const stats = useMemo(() => {
+          if (!filterMonth) return { nights: 0, revenue: 0, occupancy: 0, daysInMonth: 0 };
+          const [y, m] = filterMonth.split("-").map(Number);
+          const monthStart = new Date(y, m - 1, 1);
+          const monthEnd = new Date(y, m, 1);
+          const daysInMonth = Math.round((monthEnd - monthStart) / (1000*60*60*24));
+          let occupiedNights = 0, revenue = 0;
+          for (const r of filtered) {
+            const aStart = toDate(r.start) < monthStart ? monthStart : toDate(r.start);
+            const aEnd = toDate(r.end) > monthEnd ? monthEnd : toDate(r.end);
+            const n = Math.max(0, Math.round((aEnd - aStart)/(1000*60*60*24)));
+            occupiedNights += n;
+            revenue += r.unit === "per_night" ? (n * (r.price || 0)) : (r.price || 0);
+          }
+          return { nights: occupiedNights, revenue, occupancy: daysInMonth ? Math.min(100, Math.round((occupiedNights / daysInMonth) * 100)) : 0, daysInMonth };
+        }, [filtered, filterMonth]);
+
+        const exportJson = () => {
+          const data = JSON.stringify(items, null, 2);
+          const blob = new Blob([data], { type: "application/json" });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url; a.download = `rezervacije_${new Date().toISOString().slice(0,10)}.json`; a.click();
+          URL.revokeObjectURL(url);
+        };
+
+        const exportCsv = () => {
+          const header = ["id","start","end","nights","guests","price","unit","note"].join(",");
+          const rows = items.map(r => [r.id, r.start, r.end, nightsBetween(r.start, r.end), r.guests, r.price, r.unit, (r.note||"").replaceAll(","," ")].join(","));
+          const csv = [header, ...rows].join("\n");
+          const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url; a.download = `rezervacije_${new Date().toISOString().slice(0,10)}.csv`; a.click();
+          URL.revokeObjectURL(url);
+        };
+
+        const clearAll = () => {
+          if (items.length === 0) return;
+          if (confirm("Obrisati sve rezervacije?")) setItems([]);
+        };
+
+        useEffect(() => {
+          if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('./sw.js').catch(() => {});
+          }
+        }, []);
+
+        return (
+          <div className="min-h-screen bg-slate-50 text-slate-900 p-6">
+            <div className="max-w-6xl mx-auto grid gap-6">
+              <header className="flex items-center justify-between">
+                <h1 className="text-2xl md:text-3xl font-bold">Kalendar rezervacija</h1>
+                <div className="flex gap-2">
+                  <button onClick={exportCsv} className="px-3 py-2 rounded-2xl bg-white shadow hover:shadow-md">Izvoz CSV</button>
+                  <button onClick={exportJson} className="px-3 py-2 rounded-2xl bg-white shadow hover:shadow-md">Izvoz JSON</button>
+                  <button onClick={clearAll} className="px-3 py-2 rounded-2xl bg-rose-50 text-rose-700 shadow hover:shadow-md">Obriši sve</button>
+                </div>
+              </header>
+
+              <section className="bg-white rounded-2xl shadow p-4 md:p-6">
+                <h2 className="text-xl font-semibold mb-4">{editingId ? "Uredi rezervaciju" : "Nova rezervacija"}</h2>
+                <div className="grid md:grid-cols-2 lg:grid-cols-6 gap-4 items-end">
+                  <div>
+                    <label className="block text-sm mb-1">Dolazak</label>
+                    <input type="date" className="w-full border rounded-xl px-3 py-2" value={form.start} onChange={(e)=>setForm({...form, start:e.target.value})} />
+                  </div>
+                  <div>
+                    <label className="block text-sm mb-1">Odlazak</label>
+                    <input type="date" className="w-full border rounded-xl px-3 py-2" value={form.end} min={form.start} onChange={(e)=>setForm({...form, end:e.target.value})} />
+                  </div>
+                  <div>
+                    <label className="block text-sm mb-1">Broj ljudi</label>
+                    <input type="number" min={1} className="w-full border rounded-xl px-3 py-2" value={form.guests} onChange={(e)=>setForm({...form, guests:e.target.value})} />
+                  </div>
+                  <div>
+                    <label className="block text-sm mb-1">Način cijene</label>
+                    <select className="w-full border rounded-xl px-3 py-2" value={form.unit} onChange={(e)=>setForm({...form, unit:e.target.value})}>
+                      <option value="total">Ukupno</option>
+                      <option value="per_night">Po noćenju</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-sm mb-1">Cijena ({form.unit === 'per_night' ? '€/noć' : '€ ukupno'})</label>
+                    <input type="number" min={0} step="0.01" className="w-full border rounded-xl px-3 py-2" value={form.price} onChange={(e)=>setForm({...form, price:e.target.value})} />
+                  </div>
+                  <div className="lg:col-span-2">
+                    <label className="block text-sm mb-1">Napomena</label>
+                    <input type="text" className="w-full border rounded-xl px-3 py-2" placeholder="Npr. Booking.com, avans plaćen…" value={form.note} onChange={(e)=>setForm({...form, note:e.target.value})} />
+                  </div>
+                  <div className="lg:col-span-6 flex items-center justify-between mt-2">
+                    <div className="text-sm text-slate-600">
+                      Noćenja: <b>{nightsBetween(form.start, form.end)}</b>
+                      {" · "}
+                      Predviđeni prihod: <b>{eur(form.unit === 'per_night' ? (nightsBetween(form.start, form.end) * (Number(form.price)||0)) : (Number(form.price)||0))}</b>
+                    </div>
+                    <div className="flex gap-2">
+                      {editingId && (
+                        <button onClick={resetForm} className="px-3 py-2 rounded-2xl bg-slate-100 hover:bg-slate-200">Odustani</button>
+                      )}
+                      <button onClick={addOrUpdate} className="px-4 py-2 rounded-2xl bg-emerald-600 text-white shadow hover:shadow-lg">{editingId ? 'Spremi promjene' : 'Dodaj rezervaciju'}</button>
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <section className="bg-white rounded-2xl shadow p-4 md:p-6">
+                <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+                  <div className="flex items-center gap-2">
+                    <label className="text-sm">Mjesec:</label>
+                    <input type="month" className="border rounded-xl px-3 py-2" value={filterMonth} onChange={(e)=>setFilterMonth(e.target.value)} />
+                  </div>
+                  <div className="text-sm md:text-base">
+                    Zauzetost: <b>{stats.occupancy}%</b> ({stats.nights}/{stats.daysInMonth} noćenja) · Prihod: <b>{eur(stats.revenue)}</b>
+                  </div>
+                </div>
+              </section>
+
+              <section className="bg-white rounded-2xl shadow p-4 md:p-6">
+                <h2 className="text-lg font-semibold mb-3">Pregled mjeseca</h2>
+                <MonthTimeline month={filterMonth} reservations={items} onEdit={onEdit} />
+              </section>
+
+              <section className="bg-white rounded-2xl shadow p-4 md:p-6">
+                <h2 className="text-lg font-semibold mb-3">Sve rezervacije</h2>
+                <div className="overflow-auto">
+                  <table className="min-w-full text-sm">
+                    <thead>
+                      <tr className="text-left border-b">
+                        <th className="py-2 pr-4">Dolazak</th>
+                        <th className="py-2 pr-4">Odlazak</th>
+                        <th className="py-2 pr-4">Noćenja</th>
+                        <th className="py-2 pr-4">Ljudi</th>
+                        <th className="py-2 pr-4">Cijena</th>
+                        <th className="py-2 pr-4">Napomena</th>
+                        <th className="py-2 pr-4">Akcije</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {items.length === 0 && (
+                        <tr><td colSpan="7" className="py-6 text-center text-slate-500">Još nema rezervacija.</td></tr>
+                      )}
+                      {items.map((r) => (
+                        <tr key={r.id} className="border-b hover:bg-slate-50">
+                          <td className="py-2 pr-4">{r.start}</td>
+                          <td className="py-2 pr-4">{r.end}</td>
+                          <td className="py-2 pr-4">{nightsBetween(r.start, r.end)}</td>
+                          <td className="py-2 pr-4">{r.guests}</td>
+                          <td className="py-2 pr-4">{r.unit === 'per_night' ? `${eur(r.price)} / noć` : eur(r.price)}</td>
+                          <td className="py-2 pr-4 max-w-[24ch] truncate" title={r.note}>{r.note}</td>
+                          <td className="py-2 pr-4 flex gap-2">
+                            <button onClick={() => onEdit(r)} className="px-3 py-1 rounded-xl bg-sky-600 text-white">Uredi</button>
+                            <button onClick={() => onDelete(r)} className="px-3 py-1 rounded-xl bg-rose-600 text-white">Obriši</button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            </div>
+          </div>
+        );
+      }
+
+      const root = ReactDOM.createRoot(document.getElementById('root'));
+      root.render(<App />);
+    </script>
+  </body>
+</html>
